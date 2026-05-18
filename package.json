@@ -1,0 +1,19 @@
+{
+  "name": "realestate-pegjs-calculator",
+  "type": "module",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "compile": "node src/compile.js"
+  },
+  "dependencies": {
+    "@astrojs/tailwind": "^5.1.0",
+    "astro": "^4.16.0",
+    "tailwindcss": "^3.4.0"
+  },
+  "devDependencies": {
+    "pegjs": "^0.10.0"
+  }
+}

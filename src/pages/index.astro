@@ -1,0 +1,509 @@
+---
+import peg from 'pegjs';
+import fs from 'fs';
+import path from 'path';
+
+const GRAMMAR = `
+{
+  const ctx = options.context || {};
+  function resolve(name) {
+    if (name in ctx) return ctx[name];
+    throw new Error('Unknown reference: "' + name + '"');
+  }
+  function resolveProp(obj, prop) {
+    const val = resolve(obj);
+    if (val !== null && typeof val === 'object' && prop in val) {
+      return val[prop];
+    }
+    throw new Error('Property "' + prop + '" not found on "' + obj + '"');
+  }
+}
+
+Start = _ expr:Expression _ { return expr; }
+
+Expression = head:Term tail:(_ AddOp _ Term)* {
+  for (const [, op, , t] of tail) {
+    if (op === '+') head += t;
+    else head -= t;
+  }
+  return head;
+}
+
+AddOp = "+" / "-"
+
+Term = head:Factor tail:(_ MulOp _ Factor)* {
+  for (const [, op, , f] of tail) {
+    if (op === '*') head *= f;
+    else if (op === '/') head /= f;
+    else head /= f;
+  }
+  return head;
+}
+
+MulOp = "*" / "/" / "PER" ![A-Za-z0-9_]
+
+Factor = Paren / PropRef / VarRef / Num
+
+Paren = "(" _ expr:Expression _ ")" { return expr; }
+
+PropRef = "@" name:Name "." prop:Name {
+  return resolveProp(name, prop);
+}
+
+VarRef = "@" name:Name {
+  return resolve(name);
+}
+
+Num = num:Number _ mult:Multiplier? _ unit:Unit? {
+  let v = num;
+  if (mult === 'K') v *= 1000;
+  else if (mult === 'L') v *= 100000;
+  else if (mult === 'CR') v *= 10000000;
+  return v;
+}
+
+Number = num:$([0-9]+ ("." [0-9]+)?) { return parseFloat(num); }
+
+Multiplier = "K" ![A-Za-z0-9_] { return 'K'; }
+           / "L" ![A-Za-z0-9_] { return 'L'; }
+           / "CR" ![A-Za-z0-9_] { return 'CR'; }
+
+Unit = "SQ" __ "MT" "R"? / "MTR" / "PER" __ "SQ" __ "MT" "R"?
+
+Name = $([A-Za-z_][A-Za-z0-9_]*)
+
+__ = [ \\t]+
+_  = [ \\t]*
+`;
+
+// Pre-compile the grammar at build time → write a standalone parser to public/
+const publicDir = path.resolve('public');
+if (!fs.existsSync(publicDir)) fs.mkdirSync(publicDir, { recursive: true });
+
+const parserJS = peg.generate(GRAMMAR, { output: 'source', format: 'globals', exportVar: 'PEGParser' });
+fs.writeFileSync(path.join(publicDir, 'parser.js'), parserJS);
+---
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Real Estate PEG.js Calculator</title>
+</head>
+<body class="bg-white text-gray-800 font-sans antialiased min-h-screen">
+
+  <div class="max-w-7xl mx-auto px-4 sm:px-6 py-6 sm:py-8">
+
+    <!-- ─── header ─── -->
+    <header class="flex items-center gap-2.5 pb-4 mb-6 border-b border-gray-200">
+      <svg class="w-5 h-5 text-blue-600 shrink-0" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+      <h1 class="text-lg sm:text-xl font-bold text-gray-900">Real Estate PEG.js Calculator</h1>
+      <span class="ml-auto text-[10px] uppercase tracking-widest text-gray-400 border border-gray-200 rounded px-2 py-0.5">Demo + Docs</span>
+    </header>
+
+    <!-- ─── grid ─── -->
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-4 sm:gap-6">
+
+      <!-- ════ DEMO PANEL ════ -->
+      <section class="order-2 lg:order-1 bg-gray-50 border border-gray-200 rounded-xl overflow-hidden" aria-label="Calculator demo">
+
+        <div class="bg-gray-100 px-4 py-3 border-b border-gray-200 flex items-center gap-2 text-sm font-semibold text-gray-700">
+          <span class="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
+          Try It &mdash; edit anything below
+        </div>
+
+        <div class="p-4 sm:p-5 space-y-4">
+
+          <!-- definitions -->
+          <div>
+            <label for="defs" class="flex items-center justify-between text-xs font-semibold text-gray-500 mb-1">
+              References <span class="font-normal text-gray-400">one per line, NAME = value or &lbrace;key:val,&hellip;&rbrace;</span>
+            </label>
+            <textarea id="defs" spellcheck="false" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono text-gray-800 placeholder-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-colors resize-vertical min-h-[220px] leading-relaxed">GROUND_FLOOR - 400000 K SQ MTR
+HEIGHT - 10 MTR
+APARTMENT_1 = 30 SQ MTR
+APARTMENT_2 = 60 SQ MTR
+OFFICE = 400 SQ MTR
+SHOP = {'\u007b'}space: 100 SQ MTR, cost: 5 PER SQ MTR{'\u007d'}</textarea>
+          </div>
+
+          <!-- expression -->
+          <div>
+            <label for="expr" class="flex items-center justify-between text-xs font-semibold text-gray-500 mb-1">
+              Expression <span class="font-normal text-gray-400">@NAME references, @OBJ.prop for objects</span>
+            </label>
+            <input id="expr" spellcheck="false" value="(@GROUND_FLOOR + @APARTMENT_1 + @APARTMENT_2 + @OFFICE + @SHOP.space) * @SHOP.cost" class="w-full bg-white border border-gray-300 rounded-lg px-3 py-2.5 text-sm font-mono text-gray-800 placeholder-gray-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-200 transition-colors h-11" />
+          </div>
+
+          <!-- result -->
+          <div class="bg-white border border-gray-300 rounded-lg px-4 py-3 flex items-center gap-4 min-h-[52px]">
+            <div id="resV" class="text-xl sm:text-2xl font-bold font-mono text-emerald-600 shrink-0">&mdash;</div>
+            <div id="resM" class="text-xs text-gray-400"></div>
+          </div>
+
+          <!-- error -->
+          <div id="errb" class="hidden bg-red-50 border border-red-200 rounded-lg px-4 py-3 text-sm space-y-1" role="alert">
+            <div id="errT" class="font-semibold text-red-700">Error</div>
+            <div id="errB" class="text-red-600"></div>
+            <div id="errS" class="text-amber-600 italic text-xs mt-1"></div>
+          </div>
+
+          <!-- context grid -->
+          <div id="ctxW" class="hidden">
+            <div class="text-xs font-semibold text-gray-500 mb-1">Computed Values</div>
+            <div id="ctxG" class="flex flex-col gap-1.5"></div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- ════ DOCS PANEL ════ -->
+      <section class="order-1 lg:order-2 space-y-5 min-w-0 overflow-hidden text-sm text-gray-600 leading-relaxed" aria-label="Documentation">
+
+        <!-- What Is This -->
+        <div class="space-y-1.5">
+          <h2 class="text-base font-bold text-gray-900">What Is This?</h2>
+          <p>A <strong class="text-gray-800">real-time valuation calculator</strong> for real estate built on a <a href="https://pegjs.org/" class="text-blue-600 hover:text-blue-700 underline underline-offset-2" target="_blank">PEG.js</a> grammar parser. Write formulas using natural real-estate terminology &mdash; square meters, thousands, rates per unit &mdash; and get instant numeric results with live error feedback.</p>
+        </div>
+
+        <!-- Background -->
+        <div class="space-y-1.5">
+          <h2 class="text-base font-bold text-gray-900">Background</h2>
+          <p>I built this during my brief stint at a real estate tech company in Berlin. The team needed a way for builders and project managers to compute property valuations on the fly &mdash; mixing areas, rates, and unit conversions in a single expression &mdash; without dropping into a spreadsheet or calling an API. Traditional expression parsers couldn&rsquo;t handle the domain grammar (<code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">SQ MTR</code>, <code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">PER SQ MTR</code>, <code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">K</code>, <code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">L</code>, <code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">CR</code>), so I reached for PEG.js to define a formal grammar that speaks real estate natively.</p>
+        </div>
+
+        <!-- Why PEG.js -->
+        <div class="space-y-1.5">
+          <h2 class="text-base font-bold text-gray-900">Why PEG.js?</h2>
+          <p>The same approach works for any domain &mdash; not just real estate. Swap the grammar and you get a domain-specific calculator for anything: expense splitting (<code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">@you + @friend = 45 EUR</code>), unit conversions, invoice line-item math, or construction material estimation. PEG.js lets you define a <strong class="text-gray-800">formal grammar</strong> that speaks whatever language your domain uses &mdash; expressive and safe (no arbitrary code execution).</p>
+          <div class="border-l-4 border-blue-500 bg-blue-50 rounded-r-lg px-4 py-3 text-sm leading-relaxed">
+            <strong class="text-gray-800">Parsing Expression Grammar</strong> &mdash; PEGs are unambiguous and linear-time. Each rule is an ordered-choice of alternatives, giving us <strong class="text-gray-800">crystal-clear error messages</strong>. The real-estate example here is just one grammar &mdash; adapt the <code class="text-xs font-mono bg-blue-100 px-1.5 py-0.5 rounded text-blue-700">grammar.pegjs</code> file to your own terminology.
+          </div>
+        </div>
+
+        <!-- Quick Start -->
+        <div class="space-y-1.5">
+          <h2 class="text-base font-bold text-gray-900">Quick Start</h2>
+          <ol class="list-none space-y-1.5">
+            <li class="flex gap-2"><span class="font-semibold text-blue-600 shrink-0">1.</span><span><strong class="text-gray-800">Define references</strong> using <code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">NAME = value</code> or <code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">NAME - value</code>. Values can be plain numbers, numbers with multipliers/units, or objects.</span></li>
+            <li class="flex gap-2"><span class="font-semibold text-blue-600 shrink-0">2.</span><span><strong class="text-gray-800">Write an expression</strong> with <code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">@NAME</code>, <code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">@OBJ.prop</code>, operators <code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">+ - * / PER</code>, and parentheses.</span></li>
+            <li class="flex gap-2"><span class="font-semibold text-blue-600 shrink-0">3.</span><span><strong class="text-gray-800">Read the result</strong> &mdash; updates in real time. Errors and suggestions appear instantly below.</span></li>
+          </ol>
+        </div>
+
+        <!-- Syntax Reference -->
+        <div class="space-y-1.5">
+          <h2 class="text-base font-bold text-gray-900">Syntax Reference</h2>
+          <div class="overflow-x-auto rounded-lg border border-gray-200">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="bg-gray-50 text-gray-500 uppercase tracking-wider text-[10px]">
+                  <th class="px-3 py-2 text-left font-semibold">Construct</th>
+                  <th class="px-3 py-2 text-left font-semibold">Example</th>
+                  <th class="px-3 py-2 text-left font-semibold">Result</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200">
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Variable reference</td><td class="px-3 py-2 font-mono text-blue-700">@GROUND_FLOOR</td><td class="px-3 py-2 font-mono text-emerald-700">400,000,000</td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Object property</td><td class="px-3 py-2 font-mono text-blue-700">@SHOP.space</td><td class="px-3 py-2 font-mono text-emerald-700">100</td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Thousand (&times;1000)</td><td class="px-3 py-2 font-mono text-blue-700">400000 K</td><td class="px-3 py-2 font-mono text-emerald-700">400,000,000</td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Lakh (&times;100,000)</td><td class="px-3 py-2 font-mono text-blue-700">5 L</td><td class="px-3 py-2 font-mono text-emerald-700">500,000</td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Crore (&times;10M)</td><td class="px-3 py-2 font-mono text-blue-700">2 CR</td><td class="px-3 py-2 font-mono text-emerald-700">20,000,000</td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Area annotation</td><td class="px-3 py-2 font-mono text-blue-700">100 SQ MTR</td><td class="px-3 py-2 font-mono text-emerald-700">100 <span class="text-gray-400">(stripped)</span></td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Rate annotation</td><td class="px-3 py-2 font-mono text-blue-700">5 PER SQ MTR</td><td class="px-3 py-2 font-mono text-emerald-700">5 <span class="text-gray-400">(stripped)</span></td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Division</td><td class="px-3 py-2 font-mono text-blue-700">10 PER 2</td><td class="px-3 py-2 font-mono text-emerald-700">5</td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Grouping</td><td class="px-3 py-2 font-mono text-blue-700">(10 + 20) * 3</td><td class="px-3 py-2 font-mono text-emerald-700">90</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- Definitions -->
+        <div class="space-y-1.5">
+          <h2 class="text-base font-bold text-gray-900">Definitions</h2>
+          <div class="overflow-x-auto rounded-lg border border-gray-200">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="bg-gray-50 text-gray-500 uppercase tracking-wider text-[10px]">
+                  <th class="px-3 py-2 text-left font-semibold">Form</th>
+                  <th class="px-3 py-2 text-left font-semibold">Example</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200">
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Simple dash</td><td class="px-3 py-2 font-mono text-blue-700">GROUND_FLOOR - 400000 K SQ MTR</td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Simple equals</td><td class="px-3 py-2 font-mono text-blue-700">APARTMENT_1 = 30 SQ MTR</td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Object</td><td class="px-3 py-2 font-mono text-blue-700 text-[10px]">SHOP = &lbrace;space: 100 SQ MTR, cost: 5 PER SQ MTR&rbrace;</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="border-l-4 border-amber-500 bg-amber-50 rounded-r-lg px-4 py-3 text-sm leading-relaxed">
+            <strong class="text-gray-800">Note:</strong> Names must be single words (letters, digits, underscores). Use <code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">@NAME</code> in expressions.
+          </div>
+        </div>
+
+        <!-- Walkthrough -->
+        <div class="space-y-1.5">
+          <h2 class="text-base font-bold text-gray-900">Walkthrough</h2>
+          <p class="text-gray-600">Valuing a mixed-use property:</p>
+          <pre class="bg-gray-50 border border-gray-200 rounded-lg p-3 sm:p-4 overflow-x-auto text-xs leading-relaxed max-w-full"><span class="text-gray-400 italic"># Definitions</span>
+GROUND_FLOOR - 400000 K SQ MTR     <span class="text-gray-400 italic">→ 400,000,000 sq.m</span>
+APARTMENT_1 = 30 SQ MTR             <span class="text-gray-400 italic">→ 30 sq.m</span>
+APARTMENT_2 = 60 SQ MTR             <span class="text-gray-400 italic">→ 60 sq.m</span>
+OFFICE = 400 SQ MTR                 <span class="text-gray-400 italic">→ 400 sq.m</span>
+SHOP = &lbrace;space: 100 SQ MTR, cost: 5 PER SQ MTR&rbrace;
+  <span class="text-gray-400 italic">→ SHOP.space = 100, SHOP.cost = 5</span>
+
+<span class="text-gray-400 italic"># Expression</span>
+(@GROUND_FLOOR + @APARTMENT_1 + @APARTMENT_2 + @OFFICE + @SHOP.space) * @SHOP.cost
+
+<span class="text-gray-400 italic"># (400,000,000 + 30 + 60 + 400 + 100) × 5</span>
+<span class="text-emerald-700">= 2,000,002,950</span></pre>
+        </div>
+
+        <!-- Error Handling -->
+        <div class="space-y-1.5">
+          <h2 class="text-base font-bold text-gray-900">Error Handling</h2>
+          <div class="overflow-x-auto rounded-lg border border-gray-200">
+            <table class="w-full text-xs">
+              <thead>
+                <tr class="bg-gray-50 text-gray-500 uppercase tracking-wider text-[10px]">
+                  <th class="px-3 py-2 text-left font-semibold">Error</th>
+                  <th class="px-3 py-2 text-left font-semibold">Message</th>
+                  <th class="px-3 py-2 text-left font-semibold">Suggestion</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-200">
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Unknown ref</td><td class="px-3 py-2 font-mono text-red-600">Unknown reference: &quot;GROND_FLOOR&quot;</td><td class="px-3 py-2 text-amber-600">Did you mean: &quot;GROUND_FLOOR&quot;?</td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Missing property</td><td class="px-3 py-2 font-mono text-red-600 text-[10px]">Property &quot;xyz&quot; not found on &quot;SHOP&quot;</td><td class="px-3 py-2 text-amber-600">Check available props</td></tr>
+                <tr class="bg-white"><td class="px-3 py-2 text-gray-700">Syntax</td><td class="px-3 py-2 font-mono text-red-600">Expected &quot;+&quot; or &quot;-&quot; &hellip;</td><td class="px-3 py-2 text-amber-600">Raw PEG.js error</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="border-l-4 border-blue-500 bg-blue-50 rounded-r-lg px-4 py-3 text-sm leading-relaxed">
+            <strong class="text-gray-800">Did-you-mean</strong> uses Levenshtein distance for typo suggestions.
+          </div>
+        </div>
+
+        <!-- Grammar -->
+        <div class="space-y-1.5">
+          <h2 class="text-base font-bold text-gray-900">Grammar</h2>
+          <p class="text-gray-600"><a href="/grammar.pegjs" class="text-blue-600 hover:text-blue-700 underline underline-offset-2">View the full source</a> (24 rules).</p>
+          <pre class="bg-gray-50 border border-gray-200 rounded-lg p-3 sm:p-4 overflow-x-auto text-xs leading-relaxed max-w-full"><span class="text-amber-700">Start</span>     = _ expr:<span class="text-amber-700">Expression</span> _          <span class="text-gray-400 italic">→ number</span>
+<span class="text-amber-700">Expression</span> = head:<span class="text-amber-700">Term</span> tail:(_ <span class="text-pink-600">AddOp</span> _ <span class="text-amber-700">Term</span>)* <span class="text-gray-400 italic">→ +, -</span>
+<span class="text-amber-700">Term</span>      = head:<span class="text-amber-700">Factor</span> tail:(_ <span class="text-pink-600">MulOp</span> _ <span class="text-amber-700">Factor</span>)* <span class="text-gray-400 italic">→ *, /, PER</span>
+<span class="text-amber-700">Factor</span>    = <span class="text-amber-700">Paren</span> / <span class="text-amber-700">PropRef</span> / <span class="text-amber-700">VarRef</span> / <span class="text-amber-700">Num</span>
+<span class="text-amber-700">VarRef</span>    = <span class="text-pink-600">"@"</span> name:<span class="text-amber-700">Name</span>
+<span class="text-amber-700">PropRef</span>   = <span class="text-pink-600">"@"</span> name:<span class="text-amber-700">Name</span> <span class="text-pink-600">"."</span> prop:<span class="text-amber-700">Name</span>
+<span class="text-amber-700">Num</span>       = num:<span class="text-amber-700">Number</span> _ mult:<span class="text-amber-700">Multiplier</span>? _ <span class="text-amber-700">Unit</span>?
+<span class="text-amber-700">Multiplier</span> = <span class="text-pink-600">"K"</span> / <span class="text-pink-600">"L"</span> / <span class="text-pink-600">"CR"</span>
+<span class="text-amber-700">Unit</span>      = <span class="text-pink-600">"SQ"</span> __ <span class="text-pink-600">"MT"</span> <span class="text-pink-600">"R"</span>? / <span class="text-pink-600">"MTR"</span> / <span class="text-pink-600">"PER"</span> __ <span class="text-pink-600">"SQ"</span> __ <span class="text-pink-600">"MT"</span> <span class="text-pink-600">"R"</span>?</pre>
+        </div>
+
+        <!-- How It Works -->
+        <div class="space-y-1.5">
+          <h2 class="text-base font-bold text-gray-900">How It Works</h2>
+          <ol class="list-decimal list-inside space-y-1">
+            <li>Definition lines are parsed with a regex to extract <code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">name &rarr; value</code>.</li>
+            <li>Object values (<code class="text-xs font-mono bg-gray-100 px-1.5 py-0.5 rounded text-blue-700">&lbrace;key: val, &hellip;&rbrace;</code>) are recursively parsed &mdash; each value is an expression.</li>
+            <li>The expression is parsed by PEG.js against the resolved context.</li>
+            <li>Results display instantly; errors are caught and annotated with suggestions.</li>
+          </ol>
+          <div class="border-l-4 border-blue-500 bg-blue-50 rounded-r-lg px-4 py-3 text-sm leading-relaxed">
+            The grammar is <strong class="text-gray-800">context-free</strong>, so syntax validation doesn&rsquo;t need variable values. Runtime errors (unknown references) are caught during evaluation.
+          </div>
+        </div>
+
+      </section>
+
+    </div>
+  </div>
+
+  <script is:inline src="/parser.js"></script>
+  <script is:inline>
+
+
+    // ── Calculator (async) ──
+    class Calc {
+      constructor(p) { this.p = p; }
+
+      async parseDefs(t) {
+        const c = {};
+        if (!t || !t.trim()) return c;
+        for (const l of t.split('\n').filter(l=>l.trim())) {
+          const m = l.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*[-=]\s*(.+)$/);
+          if (!m) continue;
+          const [_,n,vs] = m, v = vs.trim();
+          if (v.startsWith('{') && v.endsWith('}')) {
+            c[n] = await this._obj(v, c);
+          } else {
+            c[n] = await this._ev(v, c);
+          }
+        }
+        return c;
+      }
+
+      async _obj(s, c) {
+        const o = {}, inner = s.slice(1,-1).trim();
+        if (!inner) return o;
+        let d=0, cur='';
+        for (const ch of inner) {
+          if (ch==='{') d++;
+          else if (ch==='}') d--;
+          else if (ch===',' && d===0) { await this._addPair(cur, o, c); cur=''; continue; }
+          cur += ch;
+        }
+        if (cur.trim()) await this._addPair(cur, o, c);
+        return o;
+      }
+
+      async _addPair(p, o, c) {
+        const ci = p.indexOf(':');
+        if (ci<0) return;
+        const k = p.slice(0,ci).trim(), v = p.slice(ci+1).trim();
+        if (k) o[k] = await this._ev(v, c);
+      }
+
+      async _ev(e, c) {
+        // Yield to the event loop so the UI stays responsive
+        await new Promise(r => setTimeout(r, 0));
+        return this.p.parse(e, { context: c });
+      }
+
+      fix(err, defs) {
+        if (!err) return null;
+        const m = err.message || '';
+        const r = m.match(/Unknown reference: "(.+)"/);
+        if (r) {
+          const bad = r[1], names = this._names(defs);
+          const sug = names.map(d=>({n:d,d:this._lev(bad,d)})).sort((a,b)=>a.d-b.d).slice(0,3).filter(s=>s.d<=3);
+          if (sug.length) return 'Did you mean: ' + sug.map(s=>'"'+s.n+'"').join(', ') + '?';
+          if (names.length) return 'Available: ' + names.join(', ');
+          return 'No references defined.';
+        }
+        const p = m.match(/Property "(.+)" not found on "(.+)"/);
+        if (p) return '"' + p[2] + '" has no property "' + p[1] + '".';
+        if (m.includes('Expected')) return m;
+        return null;
+      }
+
+      _names(t) {
+        const r = [];
+        for (const l of (t||'').split('\n')) {
+          const m = l.match(/^([A-Za-z_][A-Za-z0-9_]*)/);
+          if (m) r.push(m[1]);
+        }
+        return r;
+      }
+
+      _lev(a, b) {
+        const m=a.length, n=b.length;
+        if (!m) return n; if (!n) return m;
+        const dp = Array.from({length:m+1},()=>Array(n+1).fill(0));
+        for (let i=0;i<=m;i++) dp[i][0]=i;
+        for (let j=0;j<=n;j++) dp[0][j]=j;
+        for (let i=1;i<=m;i++) for (let j=1;j<=n;j++)
+          dp[i][j] = a[i-1]===b[j-1] ? dp[i-1][j-1] : 1 + Math.min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]);
+        return dp[m][n];
+      }
+    }
+
+    // ── UI (async) ──
+    const $ = id => document.getElementById(id);
+    const defsEl = $('defs'), exprEl = $('expr');
+    const resV = $('resV'), resM = $('resM');
+    const errb = $('errb'), errT = $('errT'), errB = $('errB'), errS = $('errS');
+    const ctxW = $('ctxW'), ctxG = $('ctxG');
+
+    let p = null, calc = null, to = null;
+    let evalGen = 0; // increment on each new eval to cancel stale ones
+
+    function fmt(n) {
+      if (n==null) return '\u2014';
+      if (!isFinite(n)) return String(n);
+      const s = n.toFixed(2).split('.');
+      s[0] = s[0].replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+      return s[1]==='00' ? s[0] : s.join('.');
+    }
+
+    function showCtx(c) {
+      const e = Object.entries(c);
+      ctxW.style.display = e.length ? 'block' : 'none';
+      ctxG.innerHTML = e.map(([k,v]) =>
+        '<div class="bg-white border border-gray-200 rounded-lg px-2.5 py-2 text-xs flex items-center justify-between gap-2"><span class="text-blue-700 font-semibold">'+k+'</span><span class="text-emerald-700 font-mono">'+
+        (typeof v==='object' ? JSON.stringify(v) : fmt(v))+'</span></div>'
+      ).join('');
+    }
+
+    async function evalAll() {
+      const gen = ++evalGen;
+      const defs = defsEl.value, expr = exprEl.value;
+      if (!calc || !p) return;
+
+      // Show loading state
+      resV.textContent = '...';
+      resV.className = 'text-xl sm:text-2xl font-bold font-mono text-emerald-600 animate-pulse';
+      resM.textContent = 'Evaluating\u2026';
+      errb.classList.add('hidden');
+
+      // Yield so the browser paints the loading indicator
+      await new Promise(r => setTimeout(r, 0));
+      if (gen !== evalGen) return;
+
+      let ctx = {}, de = null;
+      try { ctx = await calc.parseDefs(defs); } catch(e) { de = e; }
+      if (gen !== evalGen) return;
+      showCtx(ctx);
+
+      if (!expr.trim()) {
+        resV.textContent = '\u2014';
+        resV.className = 'text-xl sm:text-2xl font-bold font-mono text-emerald-600';
+        resM.textContent = 'Enter an expression to evaluate';
+        if (de) { errb.classList.remove('hidden'); errT.textContent='Definition Error'; errB.textContent=de.message; errS.textContent=''; }
+        return;
+      }
+
+      let r = null, ee = null;
+      try { r = await calc._ev(expr, ctx); } catch(e) { ee = e; }
+      if (gen !== evalGen) return;
+
+      if (ee) {
+        resV.textContent = '\u2717';
+        resV.className = 'text-xl sm:text-2xl font-bold font-mono text-red-600';
+        resM.textContent = 'Evaluation failed';
+        errb.classList.remove('hidden'); errT.textContent='Error'; errB.textContent=ee.message;
+        errS.textContent = calc.fix(ee, defs) || '';
+      } else {
+        resV.textContent = fmt(r);
+        resV.className = 'text-xl sm:text-2xl font-bold font-mono text-emerald-600';
+        resM.textContent = '= ' + r;
+        errb.classList.add('hidden');
+        if (de) { errb.classList.remove('hidden'); errT.textContent='Definition Warning'; errB.textContent=de.message; errS.textContent=''; }
+      }
+    }
+
+    function deb() { clearTimeout(to); to = setTimeout(evalAll, 150); }
+
+    function init() {
+      resV.textContent = '...';
+      resV.className = 'text-xl sm:text-2xl font-bold font-mono text-emerald-600 animate-pulse';
+      try {
+        p = PEGParser;
+        calc = new Calc(p);
+        evalAll();
+      } catch(e) {
+        resV.textContent = '\u2717';
+        resV.className = 'text-xl sm:text-2xl font-bold font-mono text-red-600';
+        resM.textContent = 'Parser compilation failed';
+        errb.classList.remove('hidden'); errT.textContent='Grammar Compilation Error';
+        errB.textContent=e.message; errS.textContent='';
+      }
+      defsEl.addEventListener('input', deb);
+      exprEl.addEventListener('input', deb);
+    }
+
+    init();
+  </script>
+
+</body>
+</html>
